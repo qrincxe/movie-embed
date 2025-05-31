@@ -1,0 +1,488 @@
+import express from 'express';
+import type { Request as ExpressRequest, Response as ExpressResponse } from 'express';
+import cors from 'cors';
+import axios from 'axios';
+import FlixHQ from './flixhq'; // Import from the TypeScript file
+
+const app = express();
+const PORT = process.env.PORT || 3001; // Using port 3001 to avoid conflicts
+
+// TMDB API configuration
+const TMDB_API_KEY = '61e2290429798c561450eb56b26de19b';
+const TMDB_BASE_URL = 'https://api.themoviedb.org/3';
+
+// Middleware
+(app as any).use(cors());
+(app as any).use(express.json());
+
+// Initialize FlixHQ provider
+const flixhq = new FlixHQ();
+
+// Define episode interface for FlixHQ results
+interface FlixHQEpisode {
+  id: string;
+  title: string;
+  number?: number;
+  season?: number;
+  url: string;
+}
+
+// Types for TMDB responses
+interface TMDBSearchResponse {
+  page: number;
+  results: any[];
+  total_results: number;
+  total_pages: number;
+}
+
+interface TMDBMovieDetails {
+  id: number;
+  title: string;
+  overview: string;
+  poster_path: string;
+  backdrop_path: string;
+  release_date: string;
+}
+
+interface TMDBTVDetails {
+  id: number;
+  name: string;
+  overview: string;
+  poster_path: string;
+  backdrop_path: string;
+  first_air_date: string;
+  number_of_seasons: number;
+}
+
+interface TMDBEpisodeDetails {
+  id: number;
+  name: string;
+  overview: string;
+  still_path: string;
+  episode_number: number;
+  season_number: number;
+  air_date: string;
+}
+
+// TMDB API helper functions
+async function searchTMDB(query: string, type: string = 'multi'): Promise<TMDBSearchResponse> {
+    try {
+        const response = await axios.get(`${TMDB_BASE_URL}/search/${type}`, {
+            params: {
+                api_key: TMDB_API_KEY,
+                query: query,
+                include_adult: false
+            }
+        });
+        return response.data;
+    } catch (error) {
+        console.error('TMDB search error:', error);
+        throw error;
+    }
+}
+
+async function getTMDBDetails(id: string, type: string): Promise<TMDBMovieDetails | TMDBTVDetails> {
+    try {
+        const response = await axios.get(`${TMDB_BASE_URL}/${type}/${id}`, {
+            params: {
+                api_key: TMDB_API_KEY
+            }
+        });
+        return response.data;
+    } catch (error) {
+        console.error(`TMDB ${type} details error:`, error);
+        throw error;
+    }
+}
+
+// Title matching helper function
+function isTitleSimilarEnough(title1: string, title2: string): boolean {
+    title1 = title1.toLowerCase().trim();
+    title2 = title2.toLowerCase().trim();
+
+    // Log the comparison for debugging
+    console.log(`Comparing titles: "${title1}" vs "${title2}"`);
+
+    // Check for exact match
+    if (title1 === title2) {
+        console.log(`Exact match found for "${title1}" and "${title2}"`);
+        return true;
+    }
+
+    // Split titles into words
+    const words1 = title1.split(/\s+/).filter(w => w.length > 0);
+    const words2 = title2.split(/\s+/).filter(w => w.length > 0);
+
+    // If one title is very short, require a higher overlap or direct substring match
+    // Adjusted to be a bit more flexible for short titles
+    if (words1.length <= 2 || words2.length <= 2) {
+        const isSubstring = title1.includes(title2) || title2.includes(title1);
+        if (isSubstring) {
+            console.log(`Substring match found for "${title1}" and "${title2}"`);
+            return true;
+        }
+    }
+
+    // Calculate word overlap (how many words they have in common)
+    const commonWords = words1.filter(word => words2.includes(word));
+    // Use Math.min for a stricter ratio - how much of the *shorter* title is in the longer one
+    const wordOverlapRatio = commonWords.length / Math.min(words1.length, words2.length);
+
+    // If they share less than 70% of words (can be adjusted), they're probably different
+    if (wordOverlapRatio < 0.7) {
+        console.log(`REJECTED: "${title1}" vs "${title2}" - insufficient word overlap: ${wordOverlapRatio.toFixed(2)}`);
+        return false;
+    }
+
+    console.log(`MATCHED: "${title1}" and "${title2}" - word overlap: ${wordOverlapRatio.toFixed(2)}`);
+    return true;
+}
+
+// Define FlixHQ search result types
+interface FlixHQSearchResult {
+    id: string;
+    title: string;
+    type: string;
+    releaseDate?: string;
+    seasons?: number;
+}
+
+interface FlixHQSearchResponse {
+    results: FlixHQSearchResult[];
+}
+
+// Helper to find best matching media (movie or TV series)
+function findBestFlixHQMatch(searchResults: FlixHQSearchResponse, tmdbDetails: TMDBMovieDetails | TMDBTVDetails, type: string): FlixHQSearchResult | null {
+    const isMovie = type === 'MOVIE';
+    const tmdbTitle = (isMovie ? (tmdbDetails as TMDBMovieDetails).title : (tmdbDetails as TMDBTVDetails).name).toLowerCase();
+
+    const relevantResults = searchResults.results.filter((m: FlixHQSearchResult) => m.type === type);
+
+    if (relevantResults.length === 0) {
+        console.log(`No relevant ${type} results found in FlixHQ search for "${tmdbTitle}".`);
+        return null;
+    }
+
+    let bestMatch: FlixHQSearchResult | null = null;
+
+    // --- TV Series Specific Matching (Prioritize Seasons) ---
+    if (!isMovie) {
+        const tmdbNumberOfSeasons = (tmdbDetails as TMDBTVDetails).number_of_seasons;
+        if (tmdbNumberOfSeasons !== undefined) {
+            // 1. Try to find an exact title match AND season count match
+            const foundMatch = relevantResults.find((show: FlixHQSearchResult) => {
+                const flixHQSeasons = show.seasons; // Assuming flixhq.js provides this
+                return isTitleSimilarEnough(show.title, tmdbTitle) &&
+                       flixHQSeasons === tmdbNumberOfSeasons;
+            });
+            bestMatch = foundMatch || null;
+
+            if (bestMatch) {
+                console.log(`Found exact title & season match on FlixHQ: ${bestMatch.title} (ID: ${bestMatch.id}) - Seasons: ${bestMatch.seasons}`);
+                return bestMatch;
+            }
+
+            // 2. Try to find the closest season count among similar titles
+            const matchingTitleShows = relevantResults.filter((show: FlixHQSearchResult) => isTitleSimilarEnough(show.title, tmdbTitle));
+            if (matchingTitleShows.length > 0) {
+                const reducedMatch = matchingTitleShows.reduce((closest: FlixHQSearchResult, current: FlixHQSearchResult) => {
+                    const currentSeasons = current.seasons || 0;
+                    const closestSeasons = closest.seasons || 0;
+                    const diffCurrent = Math.abs(currentSeasons - tmdbNumberOfSeasons);
+                    const diffClosest = Math.abs(closestSeasons - tmdbNumberOfSeasons);
+
+                    if (diffCurrent < diffClosest) {
+                        return current;
+                    }
+                    return closest;
+                }, matchingTitleShows[0]);
+                bestMatch = reducedMatch || null;
+                if (bestMatch) {
+                    console.log(`Found closest season match on FlixHQ: ${bestMatch.title} (ID: ${bestMatch.id}) - Seasons: ${bestMatch.seasons}`);
+                    return bestMatch;
+                }
+                return null;
+            }
+        }
+    }
+
+    // --- Movie Specific Matching (Prioritize Year) & TV Series Fallback ---
+    // This logic applies for movies, or if TV series couldn't be matched by seasons
+    const tmdbYear = (isMovie ? (tmdbDetails as TMDBMovieDetails).release_date : (tmdbDetails as TMDBTVDetails).first_air_date)?.substring(0, 4);
+    const tmdbYearNum = parseInt(tmdbYear || '0');
+
+    // 1. Try to find an exact title and year match (for movies, or if TV seasons fail)
+    const exactMatch = relevantResults.find((m: FlixHQSearchResult) => {
+        const flixYear = m.releaseDate?.toString()?.split('-')[0];
+        return isTitleSimilarEnough(m.title, tmdbTitle) && flixYear === tmdbYear;
+    });
+    bestMatch = exactMatch || null;
+
+    if (bestMatch) {
+        console.log(`Found exact title & year match on FlixHQ: ${bestMatch.title} (ID: ${bestMatch.id}) - Year: ${bestMatch.releaseDate}`);
+        return bestMatch;
+    }
+
+    // 2. Try to find the closest year match among similar titles (for movies, or if TV seasons fail)
+    const matchingTitleResults = relevantResults.filter((m: FlixHQSearchResult) => isTitleSimilarEnough(m.title, tmdbTitle));
+
+    if (matchingTitleResults.length > 0) {
+        if (tmdbYearNum > 0) {
+            const yearMatch = matchingTitleResults.reduce((closest: FlixHQSearchResult, current: FlixHQSearchResult) => {
+                const currentYear = parseInt(current.releaseDate?.toString()?.split('-')[0] || '0');
+                const closestYear = parseInt(closest.releaseDate?.toString()?.split('-')[0] || '0');
+                const diffCurrent = Math.abs(currentYear - tmdbYearNum);
+                const diffClosest = Math.abs(closestYear - tmdbYearNum);
+
+                if (diffCurrent < diffClosest) {
+                    return current;
+                }
+                return closest;
+            }, matchingTitleResults[0]);
+            bestMatch = yearMatch || null;
+            if (bestMatch) {
+                console.log(`Found closest year match on FlixHQ: ${bestMatch.title} (ID: ${bestMatch.id}) - Year: ${bestMatch.releaseDate}`);
+                return bestMatch;
+            }
+            return null;
+        } else {
+            // If TMDB year is unknown, just pick the first similar title
+            bestMatch = matchingTitleResults[0] || null;
+            if (bestMatch) {
+                console.log(`Found similar title (no TMDB year) match on FlixHQ: ${bestMatch.title} (ID: ${bestMatch.id}) - Year: ${bestMatch.releaseDate}`);
+                return bestMatch;
+            }
+            return null;
+        }
+    }
+
+    // 3. Fallback: If no good match by specific criteria, just take the first relevant result of the correct type
+    bestMatch = relevantResults[0] || null;
+    if (bestMatch) {
+        const fallbackYear = bestMatch.releaseDate ? bestMatch.releaseDate.toString().split('-')[0] : 'Unknown';
+        console.log(`Fallback: Used first relevant result on FlixHQ: ${bestMatch.title} (ID: ${bestMatch.id}) - Year: ${fallbackYear} (Type: ${bestMatch.type})`);
+        return bestMatch;
+    } else {
+        console.log(`No relevant ${type} results found on FlixHQ, even after fallback.`);
+        return null;
+    }
+}
+
+// Basic search endpoint for FlixHQ
+(app as any).get('/search', async (req: ExpressRequest, res: ExpressResponse) => {
+    try {
+        const { query, page = 1 } = req.query as { query?: string, page?: string };
+
+        if (!query) {
+            return res.status(400).json({ error: 'Query parameter is required' });
+        }
+
+        console.log(`Searching FlixHQ for "${query}"`);
+        const searchResults = await flixhq.search(query, parseInt(page as string));
+        res.json(searchResults);
+    } catch (error: any) {
+        console.error('Search error:', error);
+        res.status(500).json({ error: 'Internal server error', message: error.message });
+    }
+});
+
+// Get media info endpoint
+(app as any).get('/info/:mediaId', async (req: ExpressRequest, res: ExpressResponse) => {
+    try {
+        const { mediaId } = req.params;
+
+        console.log(`Fetching media info for ID: ${mediaId}`);
+        const mediaInfo = await flixhq.fetchMediaInfo(mediaId);
+        res.json(mediaInfo);
+    } catch (error: any) {
+        console.error('Media info error:', error);
+        res.status(500).json({ error: 'Internal server error', message: error.message });
+    }
+});
+
+// Get episode sources endpoint
+(app as any).get('/sources/:episodeId', async (req: ExpressRequest, res: ExpressResponse) => {
+    try {
+        const { episodeId } = req.params;
+        const { mediaId, server } = req.query as { mediaId?: string, server?: string };
+
+        console.log(`Fetching sources for episode ID: ${episodeId}`);
+        const sources = await flixhq.fetchEpisodeSources(episodeId, mediaId || '', server);
+
+        if (!sources.sources || sources.sources.length === 0) {
+            console.log('Warning: No sources found for this episode ID');
+        } else {
+            console.log(`Found ${sources.sources.length} sources for this episode.`);
+        }
+
+        res.json(sources);
+    } catch (error: any) {
+        console.error('Sources error:', error);
+        res.status(500).json({ error: 'Internal server error', message: error.message });
+    }
+});
+
+// Movie endpoint: /movie/{tmdbId}
+(app as any).get('/movie/:tmdbId', async (req: ExpressRequest, res: ExpressResponse) => {
+    try {
+        const { tmdbId } = req.params;
+
+        // Get movie details from TMDB API
+        console.log(`Getting TMDB details for movie ID: ${tmdbId}`);
+        const tmdbDetails = await getTMDBDetails(tmdbId, 'movie') as TMDBMovieDetails;
+
+        // Prepare search query for FlixHQ (prefer TMDB title)
+        const searchQuery = tmdbDetails.title;
+        console.log(`Searching FlixHQ for movie: "${searchQuery}"`);
+
+        const searchResults = await flixhq.search(searchQuery);
+
+        let movie = findBestFlixHQMatch(searchResults, tmdbDetails, 'MOVIE');
+
+        if (!movie) {
+            return res.status(404).json({
+                error: 'Movie not found on FlixHQ after multiple attempts',
+                tmdbDetails: tmdbDetails
+            });
+        }
+
+        console.log(`Found movie on FlixHQ: ${movie.title} (ID: ${movie.id})`);
+
+        // Fetch movie info from FlixHQ
+        const movieInfo = await flixhq.fetchMediaInfo(movie.id);
+        console.log(`Fetched movie info from FlixHQ: ${movieInfo.title}`);
+
+        // For movies, get the first episode (which is the movie itself)
+        if (movieInfo.episodes && movieInfo.episodes.length > 0) {
+            const episode = movieInfo.episodes[0];
+            console.log(`Fetching sources for movie episode ID: ${episode.id}`);
+
+            // Get all available servers and sources
+            const embedLinks = await flixhq.fetchMovieEmbedLinks(episode.id);
+
+            return res.json({
+                tmdbId: tmdbId,
+                tmdbTitle: tmdbDetails.title,
+                tmdbPosterPath: tmdbDetails.poster_path,
+                tmdbBackdropPath: tmdbDetails.backdrop_path,
+                title: movieInfo.title,
+                image: movieInfo.image,
+                description: movieInfo.description || tmdbDetails.overview,
+                sources: embedLinks.sources || []
+            });
+        } else {
+            return res.status(404).json({
+                error: 'No sources found for this movie on FlixHQ',
+                tmdbDetails: tmdbDetails
+            });
+        }
+    } catch (error: any) {
+        console.error('Movie endpoint error:', error);
+        res.status(500).json({ error: 'Internal server error', message: error.message });
+    }
+});
+
+// TV Series endpoint: /tv/{tmdbId}/{season}/{episode}
+(app as any).get('/tv/:tmdbId/:season/:episode', async (req: ExpressRequest, res: ExpressResponse) => {
+    try {
+        const { tmdbId, season, episode } = req.params;
+        const seasonNum = parseInt(season);
+        const episodeNum = parseInt(episode);
+
+        // Get TMDB details in parallel
+        console.log(`Getting TMDB details for TV show ID: ${tmdbId}, Season: ${seasonNum}, Episode: ${episodeNum}`);
+        const [tmdbDetails, episodeDetails] = await Promise.all([
+            getTMDBDetails(tmdbId, 'tv') as Promise<TMDBTVDetails>,
+            axios.get(
+                `${TMDB_BASE_URL}/tv/${tmdbId}/season/${seasonNum}/episode/${episodeNum}`,
+                { params: { api_key: TMDB_API_KEY } }
+            ).then(res => res.data as TMDBEpisodeDetails).catch(() => null) // Handle cases where episode details might not be found
+        ]);
+
+        if (!tmdbDetails) {
+            return res.status(404).json({ error: 'TV show not found on TMDB' });
+        }
+
+        // Prepare search query for FlixHQ (prefer TMDB name)
+        const searchQuery = tmdbDetails.name;
+        console.log(`Searching FlixHQ for TV show: "${searchQuery}"`);
+
+        const searchResults = await flixhq.search(searchQuery);
+
+        let tvShow = findBestFlixHQMatch(searchResults, tmdbDetails, 'TVSERIES');
+
+        if (!tvShow) {
+            return res.status(404).json({
+                error: 'TV show not found on FlixHQ after multiple attempts',
+                tmdbDetails: tmdbDetails,
+                episodeDetails: episodeDetails
+            });
+        }
+
+        // Log the matched FlixHQ show with seasons, not year
+        const flixhqShowSeasons = tvShow.seasons !== undefined ? tvShow.seasons : 'Unknown';
+        console.log(`Found TV show on FlixHQ: ${tvShow.title} (ID: ${tvShow.id}) - Seasons: ${flixhqShowSeasons}`);
+
+        // Fetch TV show info from FlixHQ
+        const tvInfo = await flixhq.fetchMediaInfo(tvShow.id);
+        console.log(`Fetched TV info from FlixHQ: ${tvInfo.title}`);
+
+        // Find the requested episode
+        const targetEpisode = tvInfo.episodes?.find(
+            (ep: any) => ep.season === seasonNum && ep.number === episodeNum
+        );
+
+        if (!targetEpisode) {
+            // Return a more concise list of available episodes
+            const availableSeasons: { [key: number]: number[] } = {};
+            tvInfo.episodes?.forEach((ep: FlixHQEpisode) => {
+                const season = ep.season || 0;
+                const number = ep.number || 0;
+                if (!availableSeasons[season]) {
+                    availableSeasons[season] = [];
+                }
+                availableSeasons[season].push(number);
+            });
+
+            return res.status(404).json({
+                error: `Episode not found on FlixHQ for Season ${seasonNum}, Episode ${episodeNum}`,
+                tmdbDetails: {
+                    id: tmdbDetails.id,
+                    name: tmdbDetails.name
+                },
+                availableSeasons
+            });
+        }
+
+        console.log(`Found episode on FlixHQ: ${targetEpisode.title} (ID: ${targetEpisode.id})`);
+
+        // Get all available servers and sources for the episode
+        const embedLinks = await flixhq.fetchTvEpisodeEmbedLinks(targetEpisode.id);
+
+        return res.json({
+            tmdbId: tmdbId,
+            tmdbTitle: tmdbDetails.name,
+            tmdbPosterPath: tmdbDetails.poster_path,
+            tmdbBackdropPath: tmdbDetails.backdrop_path,
+            episodeName: episodeDetails?.name || targetEpisode.title,
+            title: tvInfo.title, // FlixHQ show title
+            episode: targetEpisode.title, // FlixHQ episode title
+            season: seasonNum,
+            number: episodeNum,
+            image: tvInfo.image,
+            description: episodeDetails?.overview || tmdbDetails.overview,
+            sources: embedLinks.sources || []
+        });
+    } catch (error: any) {
+        console.error('TV endpoint error:', error);
+        res.status(500).json({ error: 'Internal server error', message: error.message });
+    }
+});
+
+
+
+// Start the server
+(app as any).listen(PORT, () => {
+    console.log(`Server running on http://localhost:${PORT}`);
+    console.log('Note: Server is configured to only use MegaCloud sources to avoid UTF-8 errors');
+});
