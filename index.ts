@@ -10,6 +10,9 @@ const PORT = process.env.PORT || 3001; // Using port 3001 to avoid conflicts
 // TMDB API configuration
 const TMDB_API_KEY = '61e2290429798c561450eb56b26de19b';
 const TMDB_BASE_URL = 'https://api.themoviedb.org/3';
+const TMDB_IMAGE_BASE_URL = 'https://image.tmdb.org/t/p/';
+const POSTER_SIZE = 'w500';
+const BACKDROP_SIZE = 'original';
 
 // Middleware
 (app as any).use(cors());
@@ -100,12 +103,8 @@ function isTitleSimilarEnough(title1: string, title2: string): boolean {
     title1 = title1.toLowerCase().trim();
     title2 = title2.toLowerCase().trim();
 
-    // Log the comparison for debugging
-    console.log(`Comparing titles: "${title1}" vs "${title2}"`);
-
     // Check for exact match
     if (title1 === title2) {
-        console.log(`Exact match found for "${title1}" and "${title2}"`);
         return true;
     }
 
@@ -118,7 +117,6 @@ function isTitleSimilarEnough(title1: string, title2: string): boolean {
     if (words1.length <= 2 || words2.length <= 2) {
         const isSubstring = title1.includes(title2) || title2.includes(title1);
         if (isSubstring) {
-            console.log(`Substring match found for "${title1}" and "${title2}"`);
             return true;
         }
     }
@@ -130,11 +128,9 @@ function isTitleSimilarEnough(title1: string, title2: string): boolean {
 
     // If they share less than 70% of words (can be adjusted), they're probably different
     if (wordOverlapRatio < 0.7) {
-        console.log(`REJECTED: "${title1}" vs "${title2}" - insufficient word overlap: ${wordOverlapRatio.toFixed(2)}`);
         return false;
     }
 
-    console.log(`MATCHED: "${title1}" and "${title2}" - word overlap: ${wordOverlapRatio.toFixed(2)}`);
     return true;
 }
 
@@ -328,13 +324,10 @@ function findBestFlixHQMatch(searchResults: FlixHQSearchResponse, tmdbDetails: T
         const { tmdbId } = req.params;
 
         // Get movie details from TMDB API
-        console.log(`Getting TMDB details for movie ID: ${tmdbId}`);
         const tmdbDetails = await getTMDBDetails(tmdbId, 'movie') as TMDBMovieDetails;
 
         // Prepare search query for FlixHQ (prefer TMDB title)
         const searchQuery = tmdbDetails.title;
-        console.log(`Searching FlixHQ for movie: "${searchQuery}"`);
-
         const searchResults = await flixhq.search(searchQuery);
 
         let movie = findBestFlixHQMatch(searchResults, tmdbDetails, 'MOVIE');
@@ -346,16 +339,12 @@ function findBestFlixHQMatch(searchResults: FlixHQSearchResponse, tmdbDetails: T
             });
         }
 
-        console.log(`Found movie on FlixHQ: ${movie.title} (ID: ${movie.id})`);
-
         // Fetch movie info from FlixHQ
         const movieInfo = await flixhq.fetchMediaInfo(movie.id);
-        console.log(`Fetched movie info from FlixHQ: ${movieInfo.title}`);
 
         // For movies, get the first episode (which is the movie itself)
         if (movieInfo.episodes && movieInfo.episodes.length > 0) {
             const episode = movieInfo.episodes[0];
-            console.log(`Fetching sources for movie episode ID: ${episode.id}`);
 
             // Get all available servers and sources
             const embedLinks = await flixhq.fetchMovieEmbedLinks(episode.id);
@@ -365,6 +354,8 @@ function findBestFlixHQMatch(searchResults: FlixHQSearchResponse, tmdbDetails: T
                 tmdbTitle: tmdbDetails.title,
                 tmdbPosterPath: tmdbDetails.poster_path,
                 tmdbBackdropPath: tmdbDetails.backdrop_path,
+                tmdbPosterUrl: tmdbDetails.poster_path ? `${TMDB_IMAGE_BASE_URL}${POSTER_SIZE}${tmdbDetails.poster_path}` : null,
+                tmdbBackdropUrl: tmdbDetails.backdrop_path ? `${TMDB_IMAGE_BASE_URL}${BACKDROP_SIZE}${tmdbDetails.backdrop_path}` : null,
                 title: movieInfo.title,
                 image: movieInfo.image,
                 description: movieInfo.description || tmdbDetails.overview,
@@ -390,7 +381,6 @@ function findBestFlixHQMatch(searchResults: FlixHQSearchResponse, tmdbDetails: T
         const episodeNum = parseInt(episode);
 
         // Get TMDB details in parallel
-        console.log(`Getting TMDB details for TV show ID: ${tmdbId}, Season: ${seasonNum}, Episode: ${episodeNum}`);
         const [tmdbDetails, episodeDetails] = await Promise.all([
             getTMDBDetails(tmdbId, 'tv') as Promise<TMDBTVDetails>,
             axios.get(
@@ -405,8 +395,6 @@ function findBestFlixHQMatch(searchResults: FlixHQSearchResponse, tmdbDetails: T
 
         // Prepare search query for FlixHQ (prefer TMDB name)
         const searchQuery = tmdbDetails.name;
-        console.log(`Searching FlixHQ for TV show: "${searchQuery}"`);
-
         const searchResults = await flixhq.search(searchQuery);
 
         let tvShow = findBestFlixHQMatch(searchResults, tmdbDetails, 'TVSERIES');
@@ -419,13 +407,8 @@ function findBestFlixHQMatch(searchResults: FlixHQSearchResponse, tmdbDetails: T
             });
         }
 
-        // Log the matched FlixHQ show with seasons, not year
-        const flixhqShowSeasons = tvShow.seasons !== undefined ? tvShow.seasons : 'Unknown';
-        console.log(`Found TV show on FlixHQ: ${tvShow.title} (ID: ${tvShow.id}) - Seasons: ${flixhqShowSeasons}`);
-
         // Fetch TV show info from FlixHQ
         const tvInfo = await flixhq.fetchMediaInfo(tvShow.id);
-        console.log(`Fetched TV info from FlixHQ: ${tvInfo.title}`);
 
         // Find the requested episode
         const targetEpisode = tvInfo.episodes?.find(
@@ -454,7 +437,6 @@ function findBestFlixHQMatch(searchResults: FlixHQSearchResponse, tmdbDetails: T
             });
         }
 
-        console.log(`Found episode on FlixHQ: ${targetEpisode.title} (ID: ${targetEpisode.id})`);
 
         // Get all available servers and sources for the episode
         const embedLinks = await flixhq.fetchTvEpisodeEmbedLinks(targetEpisode.id);
@@ -464,6 +446,8 @@ function findBestFlixHQMatch(searchResults: FlixHQSearchResponse, tmdbDetails: T
             tmdbTitle: tmdbDetails.name,
             tmdbPosterPath: tmdbDetails.poster_path,
             tmdbBackdropPath: tmdbDetails.backdrop_path,
+            tmdbPosterUrl: tmdbDetails.poster_path ? `${TMDB_IMAGE_BASE_URL}${POSTER_SIZE}${tmdbDetails.poster_path}` : null,
+            tmdbBackdropUrl: tmdbDetails.backdrop_path ? `${TMDB_IMAGE_BASE_URL}${BACKDROP_SIZE}${tmdbDetails.backdrop_path}` : null,
             episodeName: episodeDetails?.name || targetEpisode.title,
             title: tvInfo.title, // FlixHQ show title
             episode: targetEpisode.title, // FlixHQ episode title
@@ -483,6 +467,5 @@ function findBestFlixHQMatch(searchResults: FlixHQSearchResponse, tmdbDetails: T
 
 // Start the server
 (app as any).listen(PORT, () => {
-    console.log(`Server running on http://localhost:${PORT}`);
-    console.log('Note: Server is configured to only use MegaCloud sources to avoid UTF-8 errors');
+    // Server started silently
 });

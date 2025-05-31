@@ -44,7 +44,7 @@ export class MegaCloud {
   // https://megacloud.tv/embed-2/e-1/1hnXq7VzX0Ex?k=1
   async extract2(embedIframeURL: URL): Promise<ExtractedData> {
     try {
-      console.log(`MegaCloud extractor processing URL: ${embedIframeURL.href}`);
+
       
       const extractedData: ExtractedData = {
         sources: [],
@@ -54,16 +54,16 @@ export class MegaCloud {
       };
 
       const xrax = embedIframeURL.pathname.split("/").pop() || "";
-      console.log(`Extracted xrax parameter: ${xrax}`);
+
       
       try {
         const resp = await getSources(xrax);
         if (!resp) {
-          console.log('No response from getSources');
+
           return extractedData;
         }
 
-        console.log(`Got sources response with ${resp.sources ? resp.sources.length : 0} sources`);
+
         
         if (Array.isArray(resp.sources)) {
           extractedData.sources = resp.sources.map((s) => ({

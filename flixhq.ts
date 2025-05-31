@@ -360,16 +360,13 @@ class FlixHQ extends MovieParser {
       });
       
       if (megaCloudElement.length > 0) {
-        const serverId = megaCloudElement.attr('data-id');
-        console.log(`Found MegaCloud server with ID: ${serverId}`);
-        
+        const serverId = megaCloudElement.attr('data-id');        
         if (serverId) {
           try {
             const { data: sourceData } = await this.client.get(`${this.baseUrl}/ajax/episode/sources/${serverId}`);
             
             if (sourceData && sourceData.link) {
               const embedUrl = sourceData.link;
-              console.log(`Found MegaCloud embed URL: ${embedUrl}`);
               
               try {
                 const directSource = await this.extractDirectLinks(embedUrl);
@@ -393,9 +390,7 @@ class FlixHQ extends MovieParser {
 
       // Only use MegaCloud sources
       const megaCloudSources = sources.filter(source => source.server.toLowerCase() === 'megacloud');
-      
-      console.log(`Found ${megaCloudSources.length} MegaCloud sources out of ${sources.length} total sources`);
-      
+  
       // If no MegaCloud sources found, provide a fallback empty source
       if (megaCloudSources.length === 0) {
         console.log('No MegaCloud sources found, returning empty sources array');
@@ -465,17 +460,13 @@ class FlixHQ extends MovieParser {
       });
       
       if (megaCloudElement.length > 0) {
-        const serverId = megaCloudElement.attr('data-id');
-        console.log(`Found MegaCloud server with ID: ${serverId}`);
-        
+        const serverId = megaCloudElement.attr('data-id');        
         if (serverId) {
           try {
             const { data: sourceData } = await this.client.get(`${this.baseUrl}/ajax/episode/sources/${serverId}`);
             
             if (sourceData && sourceData.link) {
-              const embedUrl = sourceData.link;
-              console.log(`Found MegaCloud embed URL: ${embedUrl}`);
-              
+              const embedUrl = sourceData.link;              
               try {
                 const directSource = await this.extractDirectLinks(embedUrl);
                 if (directSource) {
@@ -498,12 +489,8 @@ class FlixHQ extends MovieParser {
 
       // Only use MegaCloud sources
       const megaCloudSources = sources.filter(source => source.server.toLowerCase() === 'megacloud');
-      
-      console.log(`Found ${megaCloudSources.length} MegaCloud sources out of ${sources.length} total sources`);
-      
       // If no MegaCloud sources found, provide a fallback empty source
       if (megaCloudSources.length === 0) {
-        console.log('No MegaCloud sources found, returning empty sources array');
         return {
           id: episodeId,
           sources: [{
@@ -527,9 +514,7 @@ class FlixHQ extends MovieParser {
   }
 
   async extractDirectLinks(embedUrl: string): Promise<DirectSource> {
-    try {
-      console.log(`Extracting direct links from: ${embedUrl}`);
-      
+    try {      
       // Create a fallback source in case extraction fails
       const fallbackSource: DirectSource = {
         url: '',
@@ -540,14 +525,9 @@ class FlixHQ extends MovieParser {
       
       try {
         const serverUrl = new URL(embedUrl);
-        console.log(`Created URL object: ${serverUrl.href}`);
-        
         // Try to extract with MegaCloud
         const data = await new MegaCloud().extract2(serverUrl);
-        console.log(`MegaCloud extraction completed, sources:`, data.sources ? data.sources.length : 0);
-        
         if (!data.sources || data.sources.length === 0) {
-          console.log('No sources found in MegaCloud extraction result');
           return fallbackSource;
         }
         
@@ -558,12 +538,9 @@ class FlixHQ extends MovieParser {
           subtitles: data.tracks || []
         };
       } catch (extractError: any) {
-        console.error(`MegaCloud extraction error: ${extractError.message}`);
-        console.error(extractError);
         return fallbackSource;
       }
     } catch (err: any) {
-      console.error(`Top-level extraction error: ${err.message}`);
       throw new Error(`Failed to extract: ${err.message}`);
     }
   }
