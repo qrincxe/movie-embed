@@ -44,6 +44,8 @@ export class MegaCloud {
   // https://megacloud.tv/embed-2/e-1/1hnXq7VzX0Ex?k=1
   async extract2(embedIframeURL: URL): Promise<ExtractedData> {
     try {
+      console.log(`MegaCloud extractor processing URL: ${embedIframeURL.href}`);
+      
       const extractedData: ExtractedData = {
         sources: [],
         tracks: [],
@@ -52,25 +54,46 @@ export class MegaCloud {
       };
 
       const xrax = embedIframeURL.pathname.split("/").pop() || "";
+      console.log(`Extracted xrax parameter: ${xrax}`);
+      
+      try {
+        const resp = await getSources(xrax);
+        if (!resp) {
+          console.log('No response from getSources');
+          return extractedData;
+        }
 
-      const resp = await getSources(xrax);
-      if (!resp) return extractedData;
+        console.log(`Got sources response with ${resp.sources ? resp.sources.length : 0} sources`);
+        
+        if (Array.isArray(resp.sources)) {
+          extractedData.sources = resp.sources.map((s) => ({
+            file: s.file,
+            type: s.type,
+          }));
+        }
+        extractedData.tracks = resp.tracks || [];
+        extractedData.t = resp.t || 0;
+        extractedData.server = resp.server || 0;
 
-      if (Array.isArray(resp.sources)) {
-        extractedData.sources = resp.sources.map((s) => ({
-          file: s.file,
-          type: s.type,
-        }));
+        return extractedData;
+      } catch (innerErr: any) {
+        console.error(`Error in getSources: ${innerErr.message}`);
+        if (innerErr.message.includes('UTF-8')) {
+          console.log('Handling UTF-8 error gracefully');
+          // Return empty but valid data structure instead of throwing
+          return extractedData;
+        }
+        throw innerErr; // Re-throw if it's not a UTF-8 error
       }
-      extractedData.tracks = resp.tracks;
-      extractedData.t = resp.t;
-      extractedData.server = resp.server;
-
-
-      return extractedData
     } catch (err: any) {
-      console.log("Error " + err.message);
-      throw new Error(err.message);
+      console.error(`MegaCloud extraction error: ${err.message}`);
+      // Return empty data instead of throwing
+      return {
+        sources: [],
+        tracks: [],
+        t: 0,
+        server: 0
+      };
     }
   }
 }

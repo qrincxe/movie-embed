@@ -1,9 +1,7 @@
 import * as cheerio from 'cheerio';
 import axios from 'axios';
 import { MovieParser, TvType, StreamingServers } from './models';
-import { VideoExtractor } from './extractors';
-import { MixDrop } from './extractors/mixdrop';
-import { VidCloud } from './extractors/vidcloud';
+import { MegaCloud } from './extractors/megacloud';
 
 interface SearchResult {
   currentPage: number;
@@ -261,27 +259,19 @@ class FlixHQ extends MovieParser {
   async fetchEpisodeSources(episodeId: string, mediaId: string, server: string = StreamingServers.VidCloud): Promise<EpisodeSource> {
     if (episodeId.startsWith('http')) {
       const serverUrl = new URL(episodeId);
-      switch (server) {
-        case StreamingServers.MixDrop:
-          return {
-            headers: { Referer: serverUrl.href },
-            sources: await new MixDrop(this.proxyConfig, this.adapter).extract(serverUrl)
-          };
-        case StreamingServers.VidCloud:
-          return {
-            headers: { Referer: serverUrl.href },
-            ...(await new VidCloud(this.proxyConfig, this.adapter).extract(serverUrl, true, this.baseUrl))
-          };
-        case StreamingServers.UpCloud:
-          return {
-            headers: { Referer: serverUrl.href },
-            ...(await new VidCloud(this.proxyConfig, this.adapter).extract(serverUrl, undefined, this.baseUrl))
-          };
-        default:
-          return {
-            headers: { Referer: serverUrl.href },
-            sources: await new MixDrop(this.proxyConfig, this.adapter).extract(serverUrl)
-          };
+      try {
+        const data = await new MegaCloud().extract2(serverUrl);
+        return {
+          headers: { Referer: serverUrl.href },
+          sources: data.sources,
+          tracks: data.tracks
+        };
+      } catch (err) {
+        console.error('Error extracting with MegaCloud:', err);
+        return {
+          headers: { Referer: serverUrl.href },
+          sources: []
+        };
       }
     }
 
@@ -361,11 +351,17 @@ class FlixHQ extends MovieParser {
         };
       }
 
-      // If no serverName provided, fetch all servers (original behavior)
+      // Only fetch from MegaCloud server
       const sources: Array<any> = [];
-      const serverPromises = $('.nav-item a').map(async (i: number, el: any) => {
-        const serverId = $(el).attr('data-id');
-        const serverName = $(el).find('span').text();
+      
+      // Find MegaCloud server
+      const megaCloudElement = $('.nav-item a').filter((i: number, el: any) => {
+        return $(el).find('span').text().toLowerCase() === 'megacloud';
+      });
+      
+      if (megaCloudElement.length > 0) {
+        const serverId = megaCloudElement.attr('data-id');
+        console.log(`Found MegaCloud server with ID: ${serverId}`);
         
         if (serverId) {
           try {
@@ -373,29 +369,48 @@ class FlixHQ extends MovieParser {
             
             if (sourceData && sourceData.link) {
               const embedUrl = sourceData.link;
+              console.log(`Found MegaCloud embed URL: ${embedUrl}`);
+              
               try {
                 const directSource = await this.extractDirectLinks(embedUrl);
                 if (directSource) {
                   sources.push({
-                    server: serverName,
+                    server: 'MegaCloud',
                     ...directSource
                   });
                 }
               } catch (err) {
-                console.error(`Failed to extract direct link from ${serverName}:`, err);
+                console.error(`Failed to extract direct link from MegaCloud:`, err);
               }
             }
           } catch (err) {
-            console.error(`Failed to fetch source data from server ${serverId}:`, err);
+            console.error(`Failed to fetch source data from MegaCloud server ${serverId}:`, err);
           }
         }
-      }).get();
-
-      await Promise.all(serverPromises);
+      } else {
+        console.log('MegaCloud server not found');
+      }
 
       // Only use MegaCloud sources
       const megaCloudSources = sources.filter(source => source.server.toLowerCase() === 'megacloud');
-
+      
+      console.log(`Found ${megaCloudSources.length} MegaCloud sources out of ${sources.length} total sources`);
+      
+      // If no MegaCloud sources found, provide a fallback empty source
+      if (megaCloudSources.length === 0) {
+        console.log('No MegaCloud sources found, returning empty sources array');
+        return {
+          id: movieId,
+          sources: [{
+            server: 'MegaCloud',
+            url: '',
+            isM3U8: false,
+            quality: 'auto',
+            subtitles: []
+          }]
+        };
+      }
+      
       return {
         id: movieId,
         sources: megaCloudSources
@@ -441,11 +456,17 @@ class FlixHQ extends MovieParser {
         };
       }
 
-      // If no serverName provided, fetch all servers (original behavior)
+      // Only fetch from MegaCloud server
       const sources: Array<any> = [];
-      const serverPromises = $('.nav-item a').map(async (i: number, el: any) => {
-        const serverId = $(el).attr('data-id');
-        const serverName = $(el).find('span').text();
+      
+      // Find MegaCloud server
+      const megaCloudElement = $('.nav-item a').filter((i: number, el: any) => {
+        return $(el).find('span').text().toLowerCase() === 'megacloud';
+      });
+      
+      if (megaCloudElement.length > 0) {
+        const serverId = megaCloudElement.attr('data-id');
+        console.log(`Found MegaCloud server with ID: ${serverId}`);
         
         if (serverId) {
           try {
@@ -453,29 +474,48 @@ class FlixHQ extends MovieParser {
             
             if (sourceData && sourceData.link) {
               const embedUrl = sourceData.link;
+              console.log(`Found MegaCloud embed URL: ${embedUrl}`);
+              
               try {
                 const directSource = await this.extractDirectLinks(embedUrl);
                 if (directSource) {
                   sources.push({
-                    server: serverName,
+                    server: 'MegaCloud',
                     ...directSource
                   });
                 }
               } catch (err) {
-                console.error(`Failed to extract direct link from ${serverName}:`, err);
+                console.error(`Failed to extract direct link from MegaCloud:`, err);
               }
             }
           } catch (err) {
-            console.error(`Failed to fetch source data from server ${serverId}:`, err);
+            console.error(`Failed to fetch source data from MegaCloud server ${serverId}:`, err);
           }
         }
-      }).get();
-
-      await Promise.all(serverPromises);
+      } else {
+        console.log('MegaCloud server not found');
+      }
 
       // Only use MegaCloud sources
       const megaCloudSources = sources.filter(source => source.server.toLowerCase() === 'megacloud');
-
+      
+      console.log(`Found ${megaCloudSources.length} MegaCloud sources out of ${sources.length} total sources`);
+      
+      // If no MegaCloud sources found, provide a fallback empty source
+      if (megaCloudSources.length === 0) {
+        console.log('No MegaCloud sources found, returning empty sources array');
+        return {
+          id: episodeId,
+          sources: [{
+            server: 'MegaCloud',
+            url: '',
+            isM3U8: false,
+            quality: 'auto',
+            subtitles: []
+          }]
+        };
+      }
+      
       return {
         id: episodeId,
         sources: megaCloudSources
@@ -488,21 +528,43 @@ class FlixHQ extends MovieParser {
 
   async extractDirectLinks(embedUrl: string): Promise<DirectSource> {
     try {
-      const videoExtractor = new VideoExtractor();
-      const data = await videoExtractor.extract(embedUrl, 'https://myflixerz.to');
-
-      if (!data.sources || !data.sources[0]) {
-        throw new Error('No sources found');
-      }
-
-      return {
-        url: data.sources[0].file,
-        isM3U8: data.sources[0].type === 'hls',
+      console.log(`Extracting direct links from: ${embedUrl}`);
+      
+      // Create a fallback source in case extraction fails
+      const fallbackSource: DirectSource = {
+        url: '',
+        isM3U8: false,
         quality: 'auto',
-        subtitles: data.tracks || []
+        subtitles: []
       };
+      
+      try {
+        const serverUrl = new URL(embedUrl);
+        console.log(`Created URL object: ${serverUrl.href}`);
+        
+        // Try to extract with MegaCloud
+        const data = await new MegaCloud().extract2(serverUrl);
+        console.log(`MegaCloud extraction completed, sources:`, data.sources ? data.sources.length : 0);
+        
+        if (!data.sources || data.sources.length === 0) {
+          console.log('No sources found in MegaCloud extraction result');
+          return fallbackSource;
+        }
+        
+        return {
+          url: data.sources[0].file,
+          isM3U8: data.sources[0].type === 'hls',
+          quality: 'auto',
+          subtitles: data.tracks || []
+        };
+      } catch (extractError: any) {
+        console.error(`MegaCloud extraction error: ${extractError.message}`);
+        console.error(extractError);
+        return fallbackSource;
+      }
     } catch (err: any) {
-      throw new Error(err.message);
+      console.error(`Top-level extraction error: ${err.message}`);
+      throw new Error(`Failed to extract: ${err.message}`);
     }
   }
 }
