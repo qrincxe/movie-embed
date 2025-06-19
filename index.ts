@@ -5,7 +5,7 @@ import axios from 'axios';
 import FlixHQ from './flixhq'; // Import from the TypeScript file
 
 const app = express();
-const PORT = process.env.PORT || 3001; // Using port 3001 to avoid conflicts
+const PORT = process.env.PORT || 3000; // Using port 3001 to avoid conflicts
 
 // TMDB API configuration
 const TMDB_API_KEY = '61e2290429798c561450eb56b26de19b';
