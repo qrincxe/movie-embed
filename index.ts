@@ -318,10 +318,10 @@ function findBestFlixHQMatch(searchResults: FlixHQSearchResponse, tmdbDetails: T
     }
 });
 
-// Movie endpoint: /movie/{tmdbId}
-(app as any).get('/movie/:tmdbId', async (req: ExpressRequest, res: ExpressResponse) => {
+// Movie endpoint: /movie/{tmdbId}/{server?}
+(app as any).get('/movie/:tmdbId/:server?', async (req: ExpressRequest, res: ExpressResponse) => {
     try {
-        const { tmdbId } = req.params;
+        const { tmdbId, server: serverName } = req.params;
 
         // Get movie details from TMDB API
         const tmdbDetails = await getTMDBDetails(tmdbId, 'movie') as TMDBMovieDetails;
@@ -347,7 +347,23 @@ function findBestFlixHQMatch(searchResults: FlixHQSearchResponse, tmdbDetails: T
             const episode = movieInfo.episodes[0];
 
             // Get all available servers and sources
-            const embedLinks = await flixhq.fetchMovieEmbedLinks(episode.id);
+            const embedLinks = await flixhq.fetchMovieEmbedLinks(episode.id, serverName || null);
+
+            // Normalise result so that "sources" is always an array
+            let resultSources: any[];
+            if (Array.isArray(embedLinks.sources)) {
+                resultSources = embedLinks.sources;
+            } else if (embedLinks.url) {
+                resultSources = [{
+                    server: embedLinks.server || serverName || 'unknown',
+                    url: embedLinks.url,
+                    isM3U8: embedLinks.isM3U8,
+                    quality: embedLinks.quality,
+                    subtitles: embedLinks.subtitles || []
+                }];
+            } else {
+                resultSources = [];
+            }
 
             return res.json({
                 tmdbId: tmdbId,
@@ -359,7 +375,8 @@ function findBestFlixHQMatch(searchResults: FlixHQSearchResponse, tmdbDetails: T
                 title: movieInfo.title,
                 image: movieInfo.image,
                 description: movieInfo.description || tmdbDetails.overview,
-                sources: embedLinks.sources || []
+                sources: resultSources,
+                requestedServer: serverName || 'all'
             });
         } else {
             return res.status(404).json({
@@ -373,10 +390,10 @@ function findBestFlixHQMatch(searchResults: FlixHQSearchResponse, tmdbDetails: T
     }
 });
 
-// TV Series endpoint: /tv/{tmdbId}/{season}/{episode}
-(app as any).get('/tv/:tmdbId/:season/:episode', async (req: ExpressRequest, res: ExpressResponse) => {
+// TV Series endpoint: /tv/{tmdbId}/{season}/{episode}/{server?}
+(app as any).get('/tv/:tmdbId/:season/:episode/:server?', async (req: ExpressRequest, res: ExpressResponse) => {
     try {
-        const { tmdbId, season, episode } = req.params;
+        const { tmdbId, season, episode, server: serverName } = req.params;
         const seasonNum = parseInt(season);
         const episodeNum = parseInt(episode);
 
@@ -437,9 +454,24 @@ function findBestFlixHQMatch(searchResults: FlixHQSearchResponse, tmdbDetails: T
             });
         }
 
-
         // Get all available servers and sources for the episode
-        const embedLinks = await flixhq.fetchTvEpisodeEmbedLinks(targetEpisode.id);
+        const embedLinks = await flixhq.fetchTvEpisodeEmbedLinks(targetEpisode.id, serverName || null);
+
+        // Normalise result so that "sources" is always an array
+        let resultSources: any[];
+        if (Array.isArray(embedLinks.sources)) {
+            resultSources = embedLinks.sources;
+        } else if (embedLinks.url) {
+            resultSources = [{
+                server: embedLinks.server || serverName || 'unknown',
+                url: embedLinks.url,
+                isM3U8: embedLinks.isM3U8,
+                quality: embedLinks.quality,
+                subtitles: embedLinks.subtitles || []
+            }];
+        } else {
+            resultSources = [];
+        }
 
         return res.json({
             tmdbId: tmdbId,
@@ -455,15 +487,14 @@ function findBestFlixHQMatch(searchResults: FlixHQSearchResponse, tmdbDetails: T
             number: episodeNum,
             image: tvInfo.image,
             description: episodeDetails?.overview || tmdbDetails.overview,
-            sources: embedLinks.sources || []
+            sources: resultSources,
+            requestedServer: serverName || 'all'
         });
     } catch (error: any) {
         console.error('TV endpoint error:', error);
         res.status(500).json({ error: 'Internal server error', message: error.message });
     }
 });
-
-
 
 (app as any).listen(PORT, () => {
     console.log(`Server is running on http://localhost:${PORT}`);
