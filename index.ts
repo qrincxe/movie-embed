@@ -465,7 +465,6 @@ function findBestFlixHQMatch(searchResults: FlixHQSearchResponse, tmdbDetails: T
 
 
 
-// Start the server
 (app as any).listen(PORT, () => {
-    // Server started silently
+    console.log(`Server is running on http://localhost:${PORT}`);
 });
