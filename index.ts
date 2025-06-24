@@ -4,6 +4,9 @@ import cors from 'cors';
 import axios from 'axios';
 import FlixHQ from './flixhq'; // Import from the TypeScript file
 import { createClient } from 'redis';
+import dotenv from 'dotenv';
+
+dotenv.config();
 
 const redisClient = createClient({
     url: process.env.REDIS_URL
@@ -16,7 +19,6 @@ const CACHE_TTL_SECONDS = 60 * 60 * 12; // 43_200 seconds
 const app = express();
 const PORT = process.env.PORT || 3000; // Using port 3001 to avoid conflicts
 
-// TMDB API configuration
 const TMDB_API_KEY = '61e2290429798c561450eb56b26de19b';
 const TMDB_BASE_URL = 'https://api.themoviedb.org/3';
 const TMDB_IMAGE_BASE_URL = 'https://image.tmdb.org/t/p/';
