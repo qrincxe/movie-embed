@@ -3,6 +3,15 @@ import type { Request as ExpressRequest, Response as ExpressResponse } from 'exp
 import cors from 'cors';
 import axios from 'axios';
 import FlixHQ from './flixhq'; // Import from the TypeScript file
+import { createClient } from 'redis';
+
+const redisClient = createClient({
+    url: process.env.REDIS_URL
+});
+redisClient.connect().catch(err => console.error('Redis connection error:', err));
+
+const CACHE_TTL_SECONDS = 60 * 60 * 12; // 43_200 seconds
+
 
 const app = express();
 const PORT = process.env.PORT || 3000; // Using port 3001 to avoid conflicts
@@ -69,6 +78,20 @@ interface TMDBEpisodeDetails {
 
 // TMDB API helper functions
 async function searchTMDB(query: string, type: string = 'multi'): Promise<TMDBSearchResponse> {
+    const cacheKey = `tmdb:search:${type}:${encodeURIComponent(query.toLowerCase())}`;
+
+    // Try cache first
+    try {
+        const cached = await redisClient.get(cacheKey);
+        if (cached) {
+            const cachedStr: string = typeof cached === 'string' ? cached : cached.toString();
+            return JSON.parse(cachedStr) as TMDBSearchResponse;
+        }
+    } catch (err) {
+        console.warn('Redis get error (search):', err);
+    }
+
+    // Fallback to TMDB API
     try {
         const response = await axios.get(`${TMDB_BASE_URL}/search/${type}`, {
             params: {
@@ -77,7 +100,12 @@ async function searchTMDB(query: string, type: string = 'multi'): Promise<TMDBSe
                 include_adult: false
             }
         });
-        return response.data;
+        const data = response.data;
+
+        // Cache the response (fire-and-forget)
+        redisClient.set(cacheKey, JSON.stringify(data), { EX: CACHE_TTL_SECONDS }).catch(() => {});
+
+        return data;
     } catch (error) {
         console.error('TMDB search error:', error);
         throw error;
@@ -85,13 +113,32 @@ async function searchTMDB(query: string, type: string = 'multi'): Promise<TMDBSe
 }
 
 async function getTMDBDetails(id: string, type: string): Promise<TMDBMovieDetails | TMDBTVDetails> {
+    const cacheKey = `tmdb:details:${type}:${id}`;
+
+    // Try cache first
+    try {
+        const cached = await redisClient.get(cacheKey);
+        if (cached) {
+            const cachedStr: string = typeof cached === 'string' ? cached : cached.toString();
+            return JSON.parse(cachedStr) as TMDBMovieDetails | TMDBTVDetails;
+        }
+    } catch (err) {
+        console.warn('Redis get error (details):', err);
+    }
+
+    // Fallback to TMDB API
     try {
         const response = await axios.get(`${TMDB_BASE_URL}/${type}/${id}`, {
             params: {
                 api_key: TMDB_API_KEY
             }
         });
-        return response.data;
+        const data = response.data;
+
+        // Cache the response (fire-and-forget)
+        redisClient.set(cacheKey, JSON.stringify(data), { EX: CACHE_TTL_SECONDS }).catch(() => {});
+
+        return data;
     } catch (error) {
         console.error(`TMDB ${type} details error:`, error);
         throw error;
@@ -219,6 +266,12 @@ function findBestFlixHQMatch(searchResults: FlixHQSearchResponse, tmdbDetails: T
         return bestMatch;
     }
 
+    // If this is a movie and we didn't find an exact year match, abort further matching unless TMDB year is unknown
+    if (isMovie && tmdbYear && tmdbYear.trim() !== '') {
+        console.log(`No exact title & year match found for movie "${tmdbTitle}" (${tmdbYear}). Rejecting non-matching year results.`);
+        return null;
+    }
+
     // 2. Try to find the closest year match among similar titles (for movies, or if TV seasons fail)
     const matchingTitleResults = relevantResults.filter((m: FlixHQSearchResult) => isTitleSimilarEnough(m.title, tmdbTitle));
 
@@ -252,16 +305,18 @@ function findBestFlixHQMatch(searchResults: FlixHQSearchResponse, tmdbDetails: T
         }
     }
 
-    // 3. Fallback: If no good match by specific criteria, just take the first relevant result of the correct type
-    bestMatch = relevantResults[0] || null;
-    if (bestMatch) {
-        const fallbackYear = bestMatch.releaseDate ? bestMatch.releaseDate.toString().split('-')[0] : 'Unknown';
-        console.log(`Fallback: Used first relevant result on FlixHQ: ${bestMatch.title} (ID: ${bestMatch.id}) - Year: ${fallbackYear} (Type: ${bestMatch.type})`);
-        return bestMatch;
-    } else {
-        console.log(`No relevant ${type} results found on FlixHQ, even after fallback.`);
-        return null;
+    // 3. Fallback: For TV series only, if no good match by specific criteria, use the first relevant result
+    if (!isMovie) {
+        bestMatch = relevantResults[0] || null;
+        if (bestMatch) {
+            const fallbackYear = bestMatch.releaseDate ? bestMatch.releaseDate.toString().split('-')[0] : 'Unknown';
+            console.log(`Fallback (TV): Used first relevant result on FlixHQ: ${bestMatch.title} (ID: ${bestMatch.id}) - Year: ${fallbackYear} (Type: ${bestMatch.type})`);
+            return bestMatch;
+        }
     }
+
+    console.log(`No suitable ${type} results found on FlixHQ after applying strict filters.`);
+    return null;
 }
 
 // Basic search endpoint for FlixHQ
@@ -334,8 +389,7 @@ function findBestFlixHQMatch(searchResults: FlixHQSearchResponse, tmdbDetails: T
 
         if (!movie) {
             return res.status(404).json({
-                error: 'Movie not found on FlixHQ after multiple attempts',
-                tmdbDetails: tmdbDetails
+                error: 'Movie not found on FlixHQ after multiple attempts'
             });
         }
 
@@ -418,9 +472,7 @@ function findBestFlixHQMatch(searchResults: FlixHQSearchResponse, tmdbDetails: T
 
         if (!tvShow) {
             return res.status(404).json({
-                error: 'TV show not found on FlixHQ after multiple attempts',
-                tmdbDetails: tmdbDetails,
-                episodeDetails: episodeDetails
+                error: 'TV show not found on FlixHQ after multiple attempts'
             });
         }
 
@@ -446,10 +498,6 @@ function findBestFlixHQMatch(searchResults: FlixHQSearchResponse, tmdbDetails: T
 
             return res.status(404).json({
                 error: `Episode not found on FlixHQ for Season ${seasonNum}, Episode ${episodeNum}`,
-                tmdbDetails: {
-                    id: tmdbDetails.id,
-                    name: tmdbDetails.name
-                },
                 availableSeasons
             });
         }
