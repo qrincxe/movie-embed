@@ -5,20 +5,100 @@ import axios from 'axios';
 import FlixHQ from './flixhq'; // Import from the TypeScript file
 import { createClient } from 'redis';
 import dotenv from 'dotenv';
+import type { RedisClientType } from 'redis';
 
 dotenv.config();
 
-const redisClient = createClient({
-    url: process.env.REDIS_URL
-});
-redisClient.connect().catch(err => console.error('Redis connection error:', err));
+// Attempt to connect to Redis if a URL is provided. Otherwise, fall back to an in-memory cache.
+let redisClient: RedisClientType | null = null;
+let redisConnected = false;
 
-const CACHE_TTL_SECONDS = 60 * 60 * 12; // 43_200 seconds
+// Redis connection configuration
+const MAX_REDIS_RECONNECT_ATTEMPTS = 3;
+let redisReconnectAttempts = 0;
 
+// Only try to connect to Redis if URL is provided and not empty
+if (process.env.REDIS_URL && process.env.REDIS_URL.trim() !== '') {
+  try {
+    redisClient = createClient({ 
+      url: process.env.REDIS_URL,
+      socket: {
+        reconnectStrategy: (retries) => {
+          // Stop trying to reconnect after MAX_REDIS_RECONNECT_ATTEMPTS
+          if (retries >= MAX_REDIS_RECONNECT_ATTEMPTS) {
+            return false; // don't reconnect anymore
+          }
+          
+          // Exponential backoff: 1s, 2s, 4s, etc.
+          const delay = Math.min(1000 * Math.pow(2, retries), 30000);
+          return delay;
+        }
+      }
+    });
+
+    // Toggle the connection flag based on events
+    redisClient.on('ready', () => {
+      redisConnected = true;
+      redisReconnectAttempts = 0;
+    });
+    redisClient.on('error', (err) => {
+      redisConnected = false;
+      // Only log the first few errors to avoid spamming the console
+      if (redisReconnectAttempts < MAX_REDIS_RECONNECT_ATTEMPTS) {
+        redisReconnectAttempts++;
+      }
+    });
+
+    // Fire-and-forget connect attempt
+    redisClient.connect().catch(() => {
+      redisConnected = false;
+    });
+  } catch (err) {
+    // Failed to initialize Redis client
+  }
+}
+
+// Very simple in-memory cache structure { value, expiryTimestamp }
+const memoryCache = new Map<string, { value: string; expiresAt: number }>();
+
+const CACHE_TTL_SECONDS = 60 * 60 * 12; // 43_200 seconds (12 hours)
+
+// Helper: get value from cache (Redis if connected, else memory)
+async function cacheGet(key: string): Promise<string | null> {
+  // Try Redis first if available
+  if (redisConnected && redisClient) {
+    try {
+      const raw = await redisClient.get(key);
+      if (typeof raw === 'string') return raw;
+    } catch (err) {
+      // Redis get error, fall back to memory cache
+    }
+  }
+
+  // Fallback to in-memory cache
+  const cached = memoryCache.get(key);
+  if (!cached) return null;
+  if (Date.now() > cached.expiresAt) {
+    memoryCache.delete(key); // expired
+    return null;
+  }
+  return cached.value;
+}
+
+// Helper: set value in cache (Redis if connected, else memory)
+function cacheSet(key: string, value: string, ttlSeconds: number) {
+  // Fire-and-forget Redis set if available
+  if (redisConnected && redisClient) {
+    redisClient.set(key, value, { EX: ttlSeconds }).catch(() => {});
+  } else {
+    memoryCache.set(key, { value, expiresAt: Date.now() + ttlSeconds * 1000 });
+  }
+}
 
 const app = express();
 const PORT = process.env.PORT || 3000; // Using port 3001 to avoid conflicts
 
+// TMDB API configuration
 const TMDB_API_KEY = '61e2290429798c561450eb56b26de19b';
 const TMDB_BASE_URL = 'https://api.themoviedb.org/3';
 const TMDB_IMAGE_BASE_URL = 'https://image.tmdb.org/t/p/';
@@ -84,10 +164,9 @@ async function searchTMDB(query: string, type: string = 'multi'): Promise<TMDBSe
 
     // Try cache first
     try {
-        const cached = await redisClient.get(cacheKey);
-        if (cached) {
-            const cachedStr: string = typeof cached === 'string' ? cached : cached.toString();
-            return JSON.parse(cachedStr) as TMDBSearchResponse;
+        const cached = await cacheGet(cacheKey);
+        if (cached !== null) {
+            return JSON.parse(cached) as TMDBSearchResponse;
         }
     } catch (err) {
         console.warn('Redis get error (search):', err);
@@ -104,8 +183,8 @@ async function searchTMDB(query: string, type: string = 'multi'): Promise<TMDBSe
         });
         const data = response.data;
 
-        // Cache the response (fire-and-forget)
-        redisClient.set(cacheKey, JSON.stringify(data), { EX: CACHE_TTL_SECONDS }).catch(() => {});
+        // Cache the response
+        cacheSet(cacheKey, JSON.stringify(data), CACHE_TTL_SECONDS);
 
         return data;
     } catch (error) {
@@ -119,10 +198,9 @@ async function getTMDBDetails(id: string, type: string): Promise<TMDBMovieDetail
 
     // Try cache first
     try {
-        const cached = await redisClient.get(cacheKey);
-        if (cached) {
-            const cachedStr: string = typeof cached === 'string' ? cached : cached.toString();
-            return JSON.parse(cachedStr) as TMDBMovieDetails | TMDBTVDetails;
+        const cached = await cacheGet(cacheKey);
+        if (cached !== null) {
+            return JSON.parse(cached) as TMDBMovieDetails | TMDBTVDetails;
         }
     } catch (err) {
         console.warn('Redis get error (details):', err);
@@ -137,8 +215,8 @@ async function getTMDBDetails(id: string, type: string): Promise<TMDBMovieDetail
         });
         const data = response.data;
 
-        // Cache the response (fire-and-forget)
-        redisClient.set(cacheKey, JSON.stringify(data), { EX: CACHE_TTL_SECONDS }).catch(() => {});
+        // Cache the response
+        cacheSet(cacheKey, JSON.stringify(data), CACHE_TTL_SECONDS);
 
         return data;
     } catch (error) {
@@ -258,7 +336,7 @@ function findBestFlixHQMatch(searchResults: FlixHQSearchResponse, tmdbDetails: T
 
     // 1. Try to find an exact title and year match (for movies, or if TV seasons fail)
     const exactMatch = relevantResults.find((m: FlixHQSearchResult) => {
-        const flixYear = m.releaseDate?.toString()?.split('-')[0];
+        const flixYear = m.releaseDate ? m.releaseDate.split('-')[0] : undefined;
         return isTitleSimilarEnough(m.title, tmdbTitle) && flixYear === tmdbYear;
     });
     bestMatch = exactMatch || null;
@@ -280,8 +358,8 @@ function findBestFlixHQMatch(searchResults: FlixHQSearchResponse, tmdbDetails: T
     if (matchingTitleResults.length > 0) {
         if (tmdbYearNum > 0) {
             const yearMatch = matchingTitleResults.reduce((closest: FlixHQSearchResult, current: FlixHQSearchResult) => {
-                const currentYear = parseInt(current.releaseDate?.toString()?.split('-')[0] || '0');
-                const closestYear = parseInt(closest.releaseDate?.toString()?.split('-')[0] || '0');
+                const currentYear = parseInt(current.releaseDate ? current.releaseDate.split('-')[0] : '0');
+                const closestYear = parseInt(closest.releaseDate ? closest.releaseDate.split('-')[0] : '0');
                 const diffCurrent = Math.abs(currentYear - tmdbYearNum);
                 const diffClosest = Math.abs(closestYear - tmdbYearNum);
 
@@ -311,7 +389,7 @@ function findBestFlixHQMatch(searchResults: FlixHQSearchResponse, tmdbDetails: T
     if (!isMovie) {
         bestMatch = relevantResults[0] || null;
         if (bestMatch) {
-            const fallbackYear = bestMatch.releaseDate ? bestMatch.releaseDate.toString().split('-')[0] : 'Unknown';
+            const fallbackYear = bestMatch.releaseDate ? bestMatch.releaseDate.split('-')[0] : 'Unknown';
             console.log(`Fallback (TV): Used first relevant result on FlixHQ: ${bestMatch.title} (ID: ${bestMatch.id}) - Year: ${fallbackYear} (Type: ${bestMatch.type})`);
             return bestMatch;
         }
