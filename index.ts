@@ -3,60 +3,64 @@ import type { Request as ExpressRequest, Response as ExpressResponse } from 'exp
 import cors from 'cors';
 import axios from 'axios';
 import FlixHQ from './flixhq'; // Import from the TypeScript file
-import { createClient } from 'redis';
+import { Redis } from 'ioredis';
 import dotenv from 'dotenv';
-import type { RedisClientType } from 'redis';
+import cacheUtils from './utils/cache';
 
+// Load environment variables from .env file
 dotenv.config();
 
-// Attempt to connect to Redis if a URL is provided. Otherwise, fall back to an in-memory cache.
-let redisClient: RedisClientType | null = null;
-let redisConnected = false;
+// -----------------------
+// Caching (Redis + memory fallback)
+// -----------------------
 
-// Redis connection configuration
-const MAX_REDIS_RECONNECT_ATTEMPTS = 3;
-let redisReconnectAttempts = 0;
+// Redis client setup
+let redis: Redis | null = null;
+let redisConnectionAttempts = 0;
+const MAX_REDIS_CONNECTION_ATTEMPTS = 3;
 
-// Only try to connect to Redis if URL is provided and not empty
-if (process.env.REDIS_URL && process.env.REDIS_URL.trim() !== '') {
+if (process.env.REDIS_HOST) {
   try {
-    redisClient = createClient({ 
-      url: process.env.REDIS_URL,
-      socket: {
-        reconnectStrategy: (retries) => {
-          // Stop trying to reconnect after MAX_REDIS_RECONNECT_ATTEMPTS
-          if (retries >= MAX_REDIS_RECONNECT_ATTEMPTS) {
-            return false; // don't reconnect anymore
-          }
-          
-          // Exponential backoff: 1s, 2s, 4s, etc.
-          const delay = Math.min(1000 * Math.pow(2, retries), 30000);
-          return delay;
+    redis = new Redis({
+      host: process.env.REDIS_HOST,
+      port: Number(process.env.REDIS_PORT) || 6379,
+      password: process.env.REDIS_PASSWORD || undefined,
+      connectTimeout: 5000,
+      maxRetriesPerRequest: 1,
+      retryStrategy: (times) => {
+        if (times >= MAX_REDIS_CONNECTION_ATTEMPTS) {
+          // Stop retrying after max attempts
+          return null;
+        }
+        return Math.min(times * 200, 1000);
+      }
+    });
+    
+    redis.on('error', (err) => {
+      console.error('Redis connection error:', err.message);
+      redisConnectionAttempts++;
+      
+      if (redisConnectionAttempts >= MAX_REDIS_CONNECTION_ATTEMPTS) {
+        console.warn(`Failed to connect to Redis after ${MAX_REDIS_CONNECTION_ATTEMPTS} attempts. Disabling Redis cache.`);
+        // Disconnect and set to null to prevent further connection attempts
+        if (redis) {
+          redis.disconnect();
+          redis = null;
         }
       }
     });
-
-    // Toggle the connection flag based on events
-    redisClient.on('ready', () => {
-      redisConnected = true;
-      redisReconnectAttempts = 0;
-    });
-    redisClient.on('error', (err) => {
-      redisConnected = false;
-      // Only log the first few errors to avoid spamming the console
-      if (redisReconnectAttempts < MAX_REDIS_RECONNECT_ATTEMPTS) {
-        redisReconnectAttempts++;
-      }
-    });
-
-    // Fire-and-forget connect attempt
-    redisClient.connect().catch(() => {
-      redisConnected = false;
+    
+    redis.on('connect', () => {
+      console.log(`Successfully connected to Redis at ${process.env.REDIS_HOST}:${process.env.REDIS_PORT}`);
+      // Reset connection attempts on successful connection
+      redisConnectionAttempts = 0;
     });
   } catch (err) {
-    // Failed to initialize Redis client
+    console.error('Failed to initialize Redis client:', err);
+    redis = null;
   }
 }
+export { redis };
 
 // Very simple in-memory cache structure { value, expiryTimestamp }
 const memoryCache = new Map<string, { value: string; expiresAt: number }>();
@@ -64,12 +68,11 @@ const memoryCache = new Map<string, { value: string; expiresAt: number }>();
 const CACHE_TTL_SECONDS = 60 * 60 * 12; // 43_200 seconds (12 hours)
 
 // Helper: get value from cache (Redis if connected, else memory)
-async function cacheGet(key: string): Promise<string | null> {
+async function cacheGet<T>(key: string): Promise<T | null> {
   // Try Redis first if available
-  if (redisConnected && redisClient) {
+  if (redis) {
     try {
-      const raw = await redisClient.get(key);
-      if (typeof raw === 'string') return raw;
+      return await cacheUtils.get<T>(redis, key);
     } catch (err) {
       // Redis get error, fall back to memory cache
     }
@@ -82,24 +85,57 @@ async function cacheGet(key: string): Promise<string | null> {
     memoryCache.delete(key); // expired
     return null;
   }
-  return cached.value;
+  return JSON.parse(cached.value);
 }
 
 // Helper: set value in cache (Redis if connected, else memory)
-function cacheSet(key: string, value: string, ttlSeconds: number) {
-  // Fire-and-forget Redis set if available
-  if (redisConnected && redisClient) {
-    redisClient.set(key, value, { EX: ttlSeconds }).catch(() => {});
+async function cacheSet<T>(key: string, value: T, ttlSeconds: number): Promise<T> {
+  // Use Redis if available
+  if (redis) {
+    try {
+      return await cacheUtils.set(redis, key, async () => value, ttlSeconds);
+    } catch (err) {
+      // Fall back to memory cache on error
+      memoryCache.set(key, { 
+        value: JSON.stringify(value), 
+        expiresAt: Date.now() + ttlSeconds * 1000 
+      });
+    }
   } else {
-    memoryCache.set(key, { value, expiresAt: Date.now() + ttlSeconds * 1000 });
+    memoryCache.set(key, { 
+      value: JSON.stringify(value), 
+      expiresAt: Date.now() + ttlSeconds * 1000 
+    });
   }
+  return value;
+}
+
+// Helper: fetch from cache or call fetcher function
+async function cacheFetch<T>(key: string, fetcher: () => Promise<T>, ttlSeconds: number = CACHE_TTL_SECONDS): Promise<T> {
+  if (redis) {
+    try {
+      return await cacheUtils.fetch(redis, key, fetcher, ttlSeconds);
+    } catch (err) {
+      // Fall back to direct fetch on error
+      return fetcher();
+    }
+  }
+  
+  // Check memory cache
+  const cached = await cacheGet<T>(key);
+  if (cached !== null) return cached;
+  
+  // Fetch and cache
+  const value = await fetcher();
+  await cacheSet(key, value, ttlSeconds);
+  return value;
 }
 
 const app = express();
 const PORT = process.env.PORT || 3000; // Using port 3001 to avoid conflicts
 
 // TMDB API configuration
-const TMDB_API_KEY = '61e2290429798c561450eb56b26de19b';
+export const TMDB_API_KEY ='61e2290429798c561450eb56b26de19b';
 const TMDB_BASE_URL = 'https://api.themoviedb.org/3';
 const TMDB_IMAGE_BASE_URL = 'https://image.tmdb.org/t/p/';
 const POSTER_SIZE = 'w500';
@@ -161,19 +197,8 @@ interface TMDBEpisodeDetails {
 // TMDB API helper functions
 async function searchTMDB(query: string, type: string = 'multi'): Promise<TMDBSearchResponse> {
     const cacheKey = `tmdb:search:${type}:${encodeURIComponent(query.toLowerCase())}`;
-
-    // Try cache first
-    try {
-        const cached = await cacheGet(cacheKey);
-        if (cached !== null) {
-            return JSON.parse(cached) as TMDBSearchResponse;
-        }
-    } catch (err) {
-        console.warn('Redis get error (search):', err);
-    }
-
-    // Fallback to TMDB API
-    try {
+    
+    return cacheFetch<TMDBSearchResponse>(cacheKey, async () => {
         const response = await axios.get(`${TMDB_BASE_URL}/search/${type}`, {
             params: {
                 api_key: TMDB_API_KEY,
@@ -181,48 +206,21 @@ async function searchTMDB(query: string, type: string = 'multi'): Promise<TMDBSe
                 include_adult: false
             }
         });
-        const data = response.data;
-
-        // Cache the response
-        cacheSet(cacheKey, JSON.stringify(data), CACHE_TTL_SECONDS);
-
-        return data;
-    } catch (error) {
-        console.error('TMDB search error:', error);
-        throw error;
-    }
+        return response.data;
+    });
 }
 
 async function getTMDBDetails(id: string, type: string): Promise<TMDBMovieDetails | TMDBTVDetails> {
     const cacheKey = `tmdb:details:${type}:${id}`;
-
-    // Try cache first
-    try {
-        const cached = await cacheGet(cacheKey);
-        if (cached !== null) {
-            return JSON.parse(cached) as TMDBMovieDetails | TMDBTVDetails;
-        }
-    } catch (err) {
-        console.warn('Redis get error (details):', err);
-    }
-
-    // Fallback to TMDB API
-    try {
+    
+    return cacheFetch<TMDBMovieDetails | TMDBTVDetails>(cacheKey, async () => {
         const response = await axios.get(`${TMDB_BASE_URL}/${type}/${id}`, {
             params: {
                 api_key: TMDB_API_KEY
             }
         });
-        const data = response.data;
-
-        // Cache the response
-        cacheSet(cacheKey, JSON.stringify(data), CACHE_TTL_SECONDS);
-
-        return data;
-    } catch (error) {
-        console.error(`TMDB ${type} details error:`, error);
-        throw error;
-    }
+        return response.data;
+    });
 }
 
 // Title matching helper function
@@ -409,7 +407,11 @@ function findBestFlixHQMatch(searchResults: FlixHQSearchResponse, tmdbDetails: T
         }
 
         console.log(`Searching FlixHQ for "${query}"`);
-        const searchResults = await flixhq.search(query, parseInt(page as string));
+        const cacheKey = `flixhq:search:${query}:${page}`;
+        const searchResults = await cacheFetch(cacheKey, async () => {
+            return flixhq.search(query, parseInt(page as string));
+        }, 60 * 60); // Cache for 1 hour
+        
         res.json(searchResults);
     } catch (error: any) {
         console.error('Search error:', error);
@@ -423,7 +425,11 @@ function findBestFlixHQMatch(searchResults: FlixHQSearchResponse, tmdbDetails: T
         const { mediaId } = req.params;
 
         console.log(`Fetching media info for ID: ${mediaId}`);
-        const mediaInfo = await flixhq.fetchMediaInfo(mediaId);
+        const cacheKey = `flixhq:info:${mediaId}`;
+        const mediaInfo = await cacheFetch(cacheKey, async () => {
+            return flixhq.fetchMediaInfo(mediaId);
+        }, 60 * 60 * 6); // Cache for 6 hours
+        
         res.json(mediaInfo);
     } catch (error: any) {
         console.error('Media info error:', error);
@@ -438,8 +444,13 @@ function findBestFlixHQMatch(searchResults: FlixHQSearchResponse, tmdbDetails: T
         const { mediaId, server } = req.query as { mediaId?: string, server?: string };
 
         console.log(`Fetching sources for episode ID: ${episodeId}`);
-        const sources = await flixhq.fetchEpisodeSources(episodeId, mediaId || '', server);
-
+        
+        // Sources are cached for a shorter time as they might change more frequently
+        const cacheKey = `flixhq:sources:${episodeId}:${mediaId || ''}:${server || ''}`;
+        const sources = await cacheFetch(cacheKey, async () => {
+            return flixhq.fetchEpisodeSources(episodeId, mediaId || '', server);
+        }, 60 * 30); // Cache for 30 minutes
+        
         if (!sources.sources || sources.sources.length === 0) {
             console.log('Warning: No sources found for this episode ID');
         } else {
@@ -625,5 +636,13 @@ function findBestFlixHQMatch(searchResults: FlixHQSearchResponse, tmdbDetails: T
 });
 
 (app as any).listen(PORT, () => {
-    console.log(`Server is running on http://localhost:${PORT}`);
+    // Minimal server startup message
+    console.log(`Starting server on port ${PORT}... 🚀`);
+    if (!process.env.REDIS_HOST) {
+        console.warn('Redis not found. Cache disabled.');
+    }
+    
+    if (!process.env.TMDB_KEY) {
+        console.warn('TMDB API key not found. Using default key.');
+    }
 });
