@@ -9,6 +9,12 @@ interface CustomError extends Error {
   source?: string;
 }
 
+// Cache expiration constants
+const CACHE_EXPIRATION = {
+  ONE_HOUR: 60 * 60, // 3600 seconds
+  TWELVE_HOURS: 12 * 60 * 60, // 43200 seconds
+};
+
 const fetch = async <T>(redis: Redis, key: string, fetcher: () => Promise<T>, expires: number) => {
   try {
     const existing = await get<T>(redis, key);
@@ -62,4 +68,4 @@ const del = async (redis: Redis, key: string) => {
   }
 };
 
-export default { fetch, set, get, del }; 
+export default { fetch, set, get, del, CACHE_EXPIRATION }; 
